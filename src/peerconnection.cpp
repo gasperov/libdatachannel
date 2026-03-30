@@ -388,6 +388,11 @@ bool PeerConnection::getSelectedCandidatePair(Candidate *local, Candidate *remot
 	return iceTransport ? iceTransport->getSelectedCandidatePair(local, remote) : false;
 }
 
+optional<bool> PeerConnection::selectedRelayIsTcp() const {
+	auto iceTransport = impl()->getIceTransport();
+	return iceTransport ? iceTransport->selectedRelayIsTcp() : nullopt;
+}
+
 void PeerConnection::clearStats() {
 	if (auto sctpTransport = impl()->getSctpTransport())
 		return sctpTransport->clearStats();

@@ -14,7 +14,6 @@
 #include "configuration.hpp"
 #include "description.hpp"
 #include "global.hpp"
-#include "peerconnection.hpp"
 #include "transport.hpp"
 
 #if !USE_NICE
@@ -40,7 +39,8 @@ public:
 	using candidate_callback = std::function<void(const Candidate &candidate)>;
 	using gathering_state_callback = std::function<void(GatheringState state)>;
 
-	IceTransport(const Configuration &config, candidate_callback candidateCallback,
+	IceTransport(const Configuration &config,
+	             candidate_callback candidateCallback,
 	             state_callback stateChangeCallback,
 	             gathering_state_callback gatheringStateChangeCallback);
 	~IceTransport();
@@ -59,6 +59,7 @@ public:
 	bool send(message_ptr message) override; // false if dropped
 
 	bool getSelectedCandidatePair(Candidate *local, Candidate *remote);
+	optional<bool> selectedRelayIsTcp() const;
 
 private:
 	bool outgoing(message_ptr message) override;

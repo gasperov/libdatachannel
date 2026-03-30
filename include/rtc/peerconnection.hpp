@@ -95,6 +95,7 @@ public:
 	optional<string> remoteAddress() const;
 	uint16_t maxDataChannelId() const;
 	bool getSelectedCandidatePair(Candidate *local, Candidate *remote);
+	optional<bool> selectedRelayIsTcp() const;
 
 	void setLocalDescription(Description::Type type = Description::Type::Unspec, LocalDescriptionInit init = {});
 	void gatherLocalCandidates(std::vector<IceServer> additionalIceServers = {});

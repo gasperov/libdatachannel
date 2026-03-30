@@ -717,6 +717,16 @@ int rtcGetSelectedCandidatePair(int pc, char *local, int localSize, char *remote
 	});
 }
 
+int rtcGetSelectedRelayTransport(int pc) {
+	return wrap([&] {
+		auto peerConnection = getPeerConnection(pc);
+		auto relay = peerConnection->selectedRelayIsTcp();
+		if (!relay)
+			return RTC_ERR_NOT_AVAIL;
+		return *relay ? 1 : 0;
+	});
+}
+
 bool rtcIsNegotiationNeeded(int pc) {
 	return wrap([&] { return getPeerConnection(pc)->negotiationNeeded() ? 0 : 1; }) == 0 ? true
 	                                                                                     : false;
@@ -1881,5 +1891,9 @@ void rtcCleanup() {
 	} catch (const std::exception &e) {
 		PLOG_ERROR << e.what();
 	}
+}
+
+const char *rtcGetVersion(void) {
+	return RTC_VERSION;
 }
 

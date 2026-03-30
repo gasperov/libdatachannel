@@ -241,6 +241,9 @@ RTC_C_EXPORT int rtcGetRemoteAddress(int pc, char *buffer, int size);
 RTC_C_EXPORT int rtcGetSelectedCandidatePair(int pc, char *local, int localSize, char *remote,
                                              int remoteSize);
 
+// Returns 1 if the selected relay uses TCP, 0 if UDP, RTC_ERR_NOT_AVAIL if not relayed
+RTC_C_EXPORT int rtcGetSelectedRelayTransport(int pc);
+
 RTC_C_EXPORT bool rtcIsNegotiationNeeded(int pc);
 
 RTC_C_EXPORT int rtcGetMaxDataChannelStream(int pc);
@@ -563,6 +566,9 @@ RTC_C_EXPORT int rtcSetSctpSettings(const rtcSctpSettings *settings);
 // Optional global preload and cleanup
 RTC_C_EXPORT void rtcPreload(void);
 RTC_C_EXPORT void rtcCleanup(void);
+
+// Version
+RTC_C_EXPORT const char *rtcGetVersion(void); // returns "MAJOR.MINOR.PATCH"
 
 #ifdef __cplusplus
 } // extern "C"

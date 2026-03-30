@@ -46,7 +46,8 @@ void IceTransport::Cleanup() {
 	// Dummy
 }
 
-IceTransport::IceTransport(const Configuration &config, candidate_callback candidateCallback,
+IceTransport::IceTransport(const Configuration &config,
+                           candidate_callback candidateCallback,
                            state_callback stateChangeCallback,
                            gathering_state_callback gatheringStateChangeCallback)
     : Transport(nullptr, std::move(stateChangeCallback)), mRole(Description::Role::ActPass),
@@ -155,8 +156,8 @@ void IceTransport::addIceServer(IceServer server) {
 		return;
 	}
 
-	if (server.relayType != IceServer::RelayType::TurnUdp) {
-		PLOG_WARNING << "TURN transports TCP and TLS are not supported with libjuice";
+	if (server.relayType == IceServer::RelayType::TurnTls) {
+		PLOG_WARNING << "TURN transport TLS is not supported with libjuice";
 		return;
 	}
 
@@ -164,16 +165,19 @@ void IceTransport::addIceServer(IceServer server) {
 		return;
 
 	if (server.port == 0)
-		server.port = 3478; // TURN UDP port
+		server.port = 3478; // TURN default port
 
-	PLOG_INFO << "Using TURN server \"" << server.hostname << ":" << server.port << "\"";
+	PLOG_INFO << "Using TURN server \"" << server.hostname << ":" << server.port << "\""
+	          << " (" << (server.relayType == IceServer::RelayType::TurnTcp ? "TCP" : "UDP") << ")";
 	juice_turn_server_t turn_server = {};
 	turn_server.host = server.hostname.c_str();
 	turn_server.username = server.username.c_str();
 	turn_server.password = server.password.c_str();
 	turn_server.port = server.port;
-
-	if (juice_add_turn_server(mAgent.get(), &turn_server) != 0)
+	int ret = (server.relayType == IceServer::RelayType::TurnTcp)
+	              ? juice_add_turn_server_tcp(mAgent.get(), &turn_server)
+	              : juice_add_turn_server(mAgent.get(), &turn_server);
+	if (ret != 0)
 		throw std::runtime_error("Failed to add TURN server");
 
 	++mTurnServersAdded;
@@ -263,6 +267,13 @@ optional<string> IceTransport::getRemoteAddress() const {
 		return std::make_optional(string(str));
 	}
 	return nullopt;
+}
+
+optional<bool> IceTransport::selectedRelayIsTcp() const {
+	int transport = juice_get_selected_relay_transport(mAgent.get());
+	if (transport < 0)
+		return nullopt;
+	return transport == JUICE_TURN_TRANSPORT_TCP;
 }
 
 bool IceTransport::getSelectedCandidatePair(Candidate *local, Candidate *remote) {

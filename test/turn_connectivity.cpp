@@ -21,21 +21,44 @@ using namespace std;
 template <class T> weak_ptr<T> make_weak_ptr(shared_ptr<T> ptr) { return ptr; }
 
 TestResult test_turn_connectivity() {
+	// Read TURN server configuration from environment variables.
+	const char *turn_host_env = getenv("TURN_HOST");
+	const char *turn_port_env = getenv("TURN_PORT");
+	const char *turn_user_env = getenv("TURN_USERNAME");
+	const char *turn_pass_env = getenv("TURN_PASSWORD");
+
+	if (!turn_host_env || !turn_port_env || !turn_user_env || !turn_pass_env) {
+		cout << "TURN connectivity test skipped (missing environment)" << endl;
+		return TestResult(true);
+	}
+	string turn_host = turn_host_env;
+	string turn_port = turn_port_env;
+	string turn_user = turn_user_env;
+	string turn_pass = turn_pass_env;
+
+	// Build TURN URI: turn:<user>:<pass>@<host>:<port>?transport=tcp
+	// The IceServer constructor also accepts a relayType parameter.
+	IceServer turnServer(turn_host, (uint16_t)stoi(turn_port), turn_user, turn_pass,
+	                     IceServer::RelayType::TurnUdp);
+
 	InitLogger(LogLevel::Debug);
 
 	Configuration config1;
 	config1.iceTransportPolicy = TransportPolicy::Relay; // force relay
 
 	// TURN server example (use your own server in production)
-	config1.iceServers.emplace_back(
-	    "turn:openrelayproject:openrelayproject@openrelay.metered.ca:80");
+	//config1.iceServers.emplace_back("turn:openrelayproject:openrelayproject@openrelay.metered.ca:80");
+	config1.iceServers.emplace_back(turnServer);
 
 	PeerConnection pc1(config1);
 
 	Configuration config2;
 
 	// STUN server example (use your own server in production)
-	config2.iceServers.emplace_back("stun:openrelay.metered.ca:80");
+	//config2.iceServers.emplace_back("stun:openrelay.metered.ca:80");
+	IceServer stunServer(turn_host, (uint16_t)stoi(turn_port), turn_user, turn_pass,
+	                     IceServer::RelayType::TurnUdp);
+	config2.iceServers.emplace_back(stunServer);
 
 	PeerConnection pc2(config2);
 
@@ -64,8 +87,10 @@ TestResult test_turn_connectivity() {
 
 	pc2.onLocalCandidate([&pc1](Candidate candidate) {
 		// Filter server reflexive candidates
-		if (candidate.type() != rtc::Candidate::Type::ServerReflexive)
+		if (candidate.type() != rtc::Candidate::Type::ServerReflexive) {
+			cout << "Ignoring 2: " << candidate << endl;
 			return;
+		}
 
 		cout << "Candidate 2: " << candidate << endl;
 		pc1.addRemoteCandidate(string(candidate));

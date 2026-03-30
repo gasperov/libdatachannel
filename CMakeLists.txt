@@ -225,6 +225,7 @@ set(TESTS_SOURCES
 	${CMAKE_CURRENT_SOURCE_DIR}/test/simulcast_sdp_generation.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/test/simulcast_sdp_parsing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/turn_connectivity.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/turn_tcp_connectivity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/track.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/video_layers_allocation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/capi_connectivity.cpp

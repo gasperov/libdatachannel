@@ -160,7 +160,8 @@ shared_ptr<IceTransport> PeerConnection::initIceTransport() {
 		PLOG_VERBOSE << "Starting ICE transport";
 
 		auto transport = std::make_shared<IceTransport>(
-		    config, weak_bind(&PeerConnection::processLocalCandidate, this, _1),
+		    config,
+		    weak_bind(&PeerConnection::processLocalCandidate, this, _1),
 		    [this, weak_this = weak_from_this()](IceTransport::State transportState) {
 			    if (auto locked = weak_this.lock())
 				    std::invoke([=]() {
