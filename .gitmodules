@@ -8,7 +8,8 @@
 	shallow = true
 [submodule "deps/libjuice"]
 	path = deps/libjuice
-	url = https://github.com/paullouisageneau/libjuice.git
+	url = https://github.com/gasperov/libjuice.git
+	branch = special/turn_tcp
 [submodule "deps/json"]
 	path = deps/json
 	url = https://github.com/nlohmann/json.git
