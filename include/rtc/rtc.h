@@ -145,6 +145,12 @@ typedef enum {
 
 typedef enum { RTC_TRANSPORT_POLICY_ALL = 0, RTC_TRANSPORT_POLICY_RELAY = 1 } rtcTransportPolicy;
 
+typedef enum {
+	RTC_RELAY_TRANSPORT_UDP = 0,
+	RTC_RELAY_TRANSPORT_TCP = 1,
+	RTC_RELAY_TRANSPORT_TLS = 2,
+} rtcRelayTransport;
+
 #define RTC_ERR_SUCCESS 0
 #define RTC_ERR_INVALID -1   // invalid argument
 #define RTC_ERR_FAILURE -2   // runtime error
@@ -251,6 +257,10 @@ RTC_C_EXPORT int rtcGetRemoteAddress(int pc, char *buffer, int size);
 
 RTC_C_EXPORT int rtcGetSelectedCandidatePair(int pc, char *local, int localSize, char *remote,
                                              int remoteSize);
+
+// Returns a rtcRelayTransport value, or RTC_ERR_NOT_AVAIL if not currently using a relayed
+// candidate pair or not supported by the backend
+RTC_C_EXPORT int rtcGetSelectedRelayTransport(int pc);
 
 RTC_C_EXPORT bool rtcIsNegotiationNeeded(int pc);
 
