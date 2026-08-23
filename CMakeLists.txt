@@ -12,6 +12,9 @@ option(BUILD_SHARED_DEPS_LIBS "Build submodules as shared libraries" OFF)
 option(USE_GNUTLS "Use GnuTLS instead of OpenSSL" OFF)
 option(USE_MBEDTLS "Use Mbed TLS instead of OpenSSL" OFF)
 option(USE_NICE "Use libnice instead of libjuice" OFF)
+option(USE_SCHANNEL "Enable TURN over TLS (TURNS) via SChannel in libjuice (Windows only)" OFF)
+option(RTC_ENABLE_TURN_TCP "Enable TURN over TCP/TLS relay transports (libjuice only, requires a libjuice build with TURN-TCP/TLS support)" OFF)
+option(NO_SERVER "Disable TURN/STUN server support in libjuice (client-only build)" OFF)
 option(PREFER_SYSTEM_LIB "Prefer system libraries over submodules" OFF)
 option(USE_SYSTEM_SRTP "Use system libSRTP" ${PREFER_SYSTEM_LIB})
 option(USE_SYSTEM_JUICE "Use system libjuice" ${PREFER_SYSTEM_LIB})
@@ -236,6 +239,7 @@ set(TESTS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test/track.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/video_layers_allocation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/capi_connectivity.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/capi_turn_connectivity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/capi_track.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/websocket.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test/websocketserver.cpp
@@ -448,13 +452,19 @@ if (USE_GNUTLS)
 		target_link_libraries(datachannel-static PRIVATE Nettle::Nettle)
 	endif()
 elseif(USE_MBEDTLS)
-	if(NOT TARGET MbedTLS::MbedTLS)
-		find_package(MbedTLS 3 REQUIRED)
+	find_package(MbedTLS CONFIG QUIET)
+	if(TARGET MbedTLS::mbedtls)
+		set(MBEDTLS_TARGET MbedTLS::mbedtls)
+	else()
+		if(NOT TARGET MbedTLS::MbedTLS)
+			find_package(MbedTLS 3 REQUIRED)
+		endif()
+		set(MBEDTLS_TARGET MbedTLS::MbedTLS)
 	endif()
 	target_compile_definitions(datachannel PRIVATE USE_MBEDTLS=1)
 	target_compile_definitions(datachannel-static PRIVATE USE_MBEDTLS=1)
-	target_link_libraries(datachannel PRIVATE MbedTLS::MbedTLS)
-	target_link_libraries(datachannel-static PRIVATE MbedTLS::MbedTLS)
+	target_link_libraries(datachannel PRIVATE ${MBEDTLS_TARGET})
+	target_link_libraries(datachannel-static PRIVATE ${MBEDTLS_TARGET})
 else()
 	if(APPLE)
 		# This is a bug in CMake that causes it to prefer the system version over
@@ -503,6 +513,16 @@ else()
 		target_compile_definitions(datachannel-static PRIVATE RTC_SYSTEM_JUICE=0)
 		target_link_libraries(datachannel PRIVATE LibJuice::LibJuice)
 		target_link_libraries(datachannel-static PRIVATE LibJuice::LibJuiceStatic)
+	endif()
+
+	if(RTC_ENABLE_TURN_TCP)
+		target_compile_definitions(datachannel PRIVATE RTC_ENABLE_TURN_TCP=1)
+		target_compile_definitions(datachannel-static PRIVATE RTC_ENABLE_TURN_TCP=1)
+
+		if(WIN32 AND USE_SCHANNEL)
+			target_compile_definitions(datachannel PRIVATE RTC_ENABLE_TURN_TLS=1)
+			target_compile_definitions(datachannel-static PRIVATE RTC_ENABLE_TURN_TLS=1)
+		endif()
 	endif()
 endif()
 
@@ -594,6 +614,14 @@ if(NOT NO_TESTS)
 	target_include_directories(datachannel-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 	target_link_libraries(datachannel-tests datachannel Threads::Threads)
 
+	if(RTC_ENABLE_TURN_TCP)
+		target_compile_definitions(datachannel-tests PRIVATE RTC_ENABLE_TURN_TCP=1)
+
+		if(WIN32 AND USE_SCHANNEL)
+			target_compile_definitions(datachannel-tests PRIVATE RTC_ENABLE_TURN_TLS=1)
+		endif()
+	endif()
+
 	# Benchmark
 	if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
 		# Add resource files needed for UWP apps.
@@ -613,6 +641,14 @@ if(NOT NO_TESTS)
 	target_compile_definitions(datachannel-benchmark PRIVATE BENCHMARK_MAIN=1)
 	target_include_directories(datachannel-benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 	target_link_libraries(datachannel-benchmark datachannel Threads::Threads)
+
+	if(RTC_ENABLE_TURN_TCP)
+		target_compile_definitions(datachannel-benchmark PRIVATE RTC_ENABLE_TURN_TCP=1)
+
+		if(WIN32 AND USE_SCHANNEL)
+			target_compile_definitions(datachannel-benchmark PRIVATE RTC_ENABLE_TURN_TLS=1)
+		endif()
+	endif()
 endif()
 
 # Examples

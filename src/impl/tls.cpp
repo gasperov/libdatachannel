@@ -72,6 +72,11 @@ gnutls_datum_t make_datum(char *data, size_t size) {
 
 #include <time.h>
 
+#if defined(MBEDTLS_THREADING_ALT) && defined(_WIN32)
+#include <windows.h>
+#include "mbedtls/threading.h"
+#endif
+
 namespace {
 
 // Safe gmtime
@@ -92,11 +97,61 @@ size_t my_strftme(char *buf, size_t size, const char *format, const time_t *t) {
 	return ::strftime(buf, size, format, &g);
 }
 
+#if defined(MBEDTLS_THREADING_ALT) && defined(_WIN32)
+// MBEDTLS_THREADING_ALT implementation backed by native Win32 primitives.
+// Mbed TLS ships no built-in Windows threading backend (only pthreads), so this
+// is required for any Mbed TLS build with MBEDTLS_THREADING_C on Windows.
+int win32_mutex_init(mbedtls_platform_mutex_t *mutex) {
+	InitializeCriticalSection(mutex);
+	return 0;
+}
+
+void win32_mutex_destroy(mbedtls_platform_mutex_t *mutex) { DeleteCriticalSection(mutex); }
+
+int win32_mutex_lock(mbedtls_platform_mutex_t *mutex) {
+	EnterCriticalSection(mutex);
+	return 0;
+}
+
+int win32_mutex_unlock(mbedtls_platform_mutex_t *mutex) {
+	LeaveCriticalSection(mutex);
+	return 0;
+}
+
+int win32_cond_init(mbedtls_platform_condition_variable_t *cond) {
+	InitializeConditionVariable(cond);
+	return 0;
+}
+
+// CONDITION_VARIABLE has no destroy/free function in the Win32 API
+void win32_cond_destroy(mbedtls_platform_condition_variable_t *) {}
+
+int win32_cond_signal(mbedtls_platform_condition_variable_t *cond) {
+	WakeConditionVariable(cond);
+	return 0;
+}
+
+int win32_cond_broadcast(mbedtls_platform_condition_variable_t *cond) {
+	WakeAllConditionVariable(cond);
+	return 0;
+}
+
+int win32_cond_wait(mbedtls_platform_condition_variable_t *cond, mbedtls_platform_mutex_t *mutex) {
+	return SleepConditionVariableCS(cond, mutex, INFINITE) ? 0 : MBEDTLS_ERR_THREADING_USAGE_ERROR;
+}
+#endif
+
 } // namespace
 
 namespace rtc::mbedtls {
 
 void init() {
+#if defined(MBEDTLS_THREADING_ALT) && defined(_WIN32)
+	// Must be called before any other Mbed TLS/PSA function
+	mbedtls_threading_set_alt(win32_mutex_init, win32_mutex_destroy, win32_mutex_lock,
+	                          win32_mutex_unlock, win32_cond_init, win32_cond_destroy,
+	                          win32_cond_signal, win32_cond_broadcast, win32_cond_wait);
+#endif
 	check(psa_crypto_init(), "psa_crypto_init failed.");
 }
 

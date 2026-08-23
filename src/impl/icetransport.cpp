@@ -97,6 +97,7 @@ IceTransport::IceTransport(const Configuration &config, candidate_callback candi
 	} else {
 		jconfig.concurrency_mode = JUICE_CONCURRENCY_MODE_POLL;
 	}
+	mConcurrencyMode = jconfig.concurrency_mode;
 
 	// Randomize servers order
 	std::vector<IceServer> servers = config.iceServers;
@@ -156,16 +157,26 @@ void IceTransport::addIceServer(IceServer server) {
 		return;
 	}
 
-	if (server.relayType != IceServer::RelayType::TurnUdp) {
-		PLOG_WARNING << "TURN transports TCP and TLS are not supported with libjuice";
+#ifdef RTC_ENABLE_TURN_TCP
+	if (server.relayType != IceServer::RelayType::TurnUdp &&
+	    mConcurrencyMode != JUICE_CONCURRENCY_MODE_POLL) {
+		PLOG_WARNING << "TURN transports TCP and TLS require the poll concurrency mode "
+		                "(disable ICE UDP mux)";
 		return;
 	}
+#else
+	if (server.relayType != IceServer::RelayType::TurnUdp) {
+		PLOG_WARNING << "TURN transports TCP and TLS are not supported with this libjuice build "
+		                "(rebuild with RTC_ENABLE_TURN_TCP)";
+		return;
+	}
+#endif
 
 	if (mTurnServersAdded >= MAX_TURN_SERVERS_COUNT)
 		return;
 
 	if (server.port == 0)
-		server.port = 3478; // TURN UDP port
+		server.port = server.relayType == IceServer::RelayType::TurnTls ? 5349 : 3478;
 
 	PLOG_INFO << "Using TURN server \"" << server.hostname << ":" << server.port << "\"";
 	juice_turn_server_t turn_server = {};
@@ -174,10 +185,45 @@ void IceTransport::addIceServer(IceServer server) {
 	turn_server.password = server.password.c_str();
 	turn_server.port = server.port;
 
-	if (juice_add_turn_server(mAgent.get(), &turn_server) != 0)
+	int ret;
+#ifdef RTC_ENABLE_TURN_TCP
+	switch (server.relayType) {
+	case IceServer::RelayType::TurnTcp:
+		ret = juice_add_turn_server_tcp(mAgent.get(), &turn_server);
+		break;
+	case IceServer::RelayType::TurnTls:
+		// TODO: expose certificate verification control once agreed upon
+		ret = juice_add_turn_server_tls(mAgent.get(), &turn_server, false);
+		break;
+	default:
+		ret = juice_add_turn_server(mAgent.get(), &turn_server);
+		break;
+	}
+#else
+	ret = juice_add_turn_server(mAgent.get(), &turn_server);
+#endif
+
+	if (ret != 0)
 		throw std::runtime_error("Failed to add TURN server");
 
 	++mTurnServersAdded;
+}
+
+optional<IceServer::RelayType> IceTransport::getSelectedRelayType() const {
+#ifdef RTC_ENABLE_TURN_TCP
+	switch (juice_get_selected_relay_transport(mAgent.get())) {
+	case JUICE_TURN_TRANSPORT_UDP:
+		return IceServer::RelayType::TurnUdp;
+	case JUICE_TURN_TRANSPORT_TCP:
+		return IceServer::RelayType::TurnTcp;
+	case JUICE_TURN_TRANSPORT_TLS:
+		return IceServer::RelayType::TurnTls;
+	default:
+		return nullopt;
+	}
+#else
+	return nullopt;
+#endif
 }
 
 IceTransport::~IceTransport() {
@@ -971,6 +1017,11 @@ bool IceTransport::getSelectedCandidatePair(Candidate *local, Candidate *remote)
 	if (remote)
 		remote->resolve(Candidate::ResolveMode::Simple);
 	return true;
+}
+
+optional<IceServer::RelayType> IceTransport::getSelectedRelayType() const {
+	// Not implemented with libnice
+	return nullopt;
 }
 
 #endif

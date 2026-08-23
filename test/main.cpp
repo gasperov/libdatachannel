@@ -29,6 +29,12 @@ TestResult test_reliability();
 TestResult test_simulcast_sdp_generation();
 TestResult test_simulcast_sdp_parsing();
 TestResult test_turn_connectivity();
+#ifdef RTC_ENABLE_TURN_TCP
+TestResult test_turn_tcp_connectivity();
+#endif
+#ifdef RTC_ENABLE_TURN_TLS
+TestResult test_turn_tls_connectivity();
+#endif
 TestResult test_track();
 TestResult test_video_layers_allocation();
 TestResult test_fir_sdp();
@@ -45,6 +51,13 @@ TestResult test_rtcp_app_send();
 TestResult test_rtcp_app_multiple_in_compound();
 TestResult test_rtcp_app_integration();
 TestResult test_capi_connectivity();
+TestResult test_capi_turn_connectivity();
+#ifdef RTC_ENABLE_TURN_TCP
+TestResult test_capi_turn_tcp_connectivity();
+#endif
+#ifdef RTC_ENABLE_TURN_TLS
+TestResult test_capi_turn_tls_connectivity();
+#endif
 TestResult test_capi_track();
 TestResult test_websocket();
 TestResult test_websocketserver();
@@ -87,8 +100,13 @@ static const vector<Test> tests = {
     Test("WebRTC connectivity", test_connectivity),
     Test("WebRTC broken fingerprint", test_connectivity_fail_on_wrong_fingerprint),
     Test("pem", test_pem),
-    // TODO: Temporarily disabled as the Open Relay TURN server is unreliable
-    // Test("WebRTC TURN connectivity", test_turn_connectivity),
+    Test("WebRTC TURN connectivity", test_turn_connectivity),
+#ifdef RTC_ENABLE_TURN_TCP
+    Test("WebRTC TURN-TCP connectivity", test_turn_tcp_connectivity),
+#endif
+#ifdef RTC_ENABLE_TURN_TLS
+    Test("WebRTC TURN-TLS connectivity", test_turn_tls_connectivity),
+#endif
     Test("WebRTC negotiated DataChannel", test_negotiated),
     Test("WebRTC reliability mode", test_reliability),
     Test("WebRTC simulcast SDP generation", test_simulcast_sdp_generation),
@@ -118,6 +136,13 @@ static const vector<Test> tests = {
     Test("Cleanup", test_cleanup),
     // C API tests
     Test("WebRTC C API connectivity", test_capi_connectivity),
+    Test("WebRTC C API TURN connectivity", test_capi_turn_connectivity),
+#ifdef RTC_ENABLE_TURN_TCP
+    Test("WebRTC C API TURN-TCP connectivity", test_capi_turn_tcp_connectivity),
+#endif
+#ifdef RTC_ENABLE_TURN_TLS
+    Test("WebRTC C API TURN-TLS connectivity", test_capi_turn_tls_connectivity),
+#endif
 #if RTC_ENABLE_MEDIA
     Test("WebRTC C API track", test_capi_track),
 #endif
