@@ -58,6 +58,7 @@ public:
 	bool send(message_ptr message) override; // false if dropped
 
 	bool getSelectedCandidatePair(Candidate *local, Candidate *remote);
+	optional<IceServer::RelayType> getSelectedRelayType() const;
 
 private:
 	bool outgoing(message_ptr message) override;
@@ -81,6 +82,7 @@ private:
 
 #if !USE_NICE
 	unique_ptr<juice_agent_t, void (*)(juice_agent_t *)> mAgent;
+	juice_concurrency_mode_t mConcurrencyMode = JUICE_CONCURRENCY_MODE_POLL;
 	int mTurnServersAdded = 0;
 
 	static void StateChangeCallback(juice_agent_t *agent, juice_state_t state, void *user_ptr);

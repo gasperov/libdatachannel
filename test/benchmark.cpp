@@ -10,9 +10,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <thread>
+#include <vector>
 
 using namespace rtc;
 using namespace std;
@@ -24,51 +27,41 @@ using chrono::steady_clock;
 
 template <class T> weak_ptr<T> make_weak_ptr(shared_ptr<T> ptr) { return ptr; }
 
-size_t benchmark(milliseconds duration) {
-	rtc::InitLogger(LogLevel::Warning);
-	rtc::Preload();
+namespace {
 
-	Configuration config1;
-	// config1.iceServers.emplace_back("stun:stun.l.google.com:19302");
-	// config1.mtu = 1500;
+struct BenchResult {
+	string name;
+	bool connected = false;
+	size_t goodput = 0; // bytes/s
+};
+
+// Measures DataChannel goodput between two local PeerConnections. If server is set, both peers
+// are forced to relay through it (see test/turn_connectivity.cpp for the equivalent correctness
+// test); otherwise they connect directly over host candidates.
+BenchResult runBenchmark(const string &name, milliseconds duration,
+                         optional<IceServer> server = nullopt) {
+	cout << endl << "=== " << name << " ===" << endl;
+
+	Configuration config1, config2;
+	if (server) {
+		config1.iceTransportPolicy = TransportPolicy::Relay;
+		config2.iceTransportPolicy = TransportPolicy::Relay;
+		config1.iceServers.push_back(*server);
+		config2.iceServers.push_back(*server);
+	}
 
 	PeerConnection pc1(config1);
-
-	Configuration config2;
-	// config2.iceServers.emplace_back("stun:stun.l.google.com:19302");
-	// config2.mtu = 1500;
-
 	PeerConnection pc2(config2);
 
-	pc1.onLocalDescription([&pc2](Description sdp) {
-		cout << "Description 1: " << sdp << endl;
-		pc2.setRemoteDescription(std::move(sdp));
-	});
-
-	pc1.onLocalCandidate([&pc2](Candidate candidate) {
-		cout << "Candidate 1: " << candidate << endl;
-		pc2.addRemoteCandidate(std::move(candidate));
-	});
-
+	pc1.onLocalDescription([&pc2](Description sdp) { pc2.setRemoteDescription(std::move(sdp)); });
+	pc1.onLocalCandidate(
+	    [&pc2](Candidate candidate) { pc2.addRemoteCandidate(std::move(candidate)); });
 	pc1.onStateChange([](PeerConnection::State state) { cout << "State 1: " << state << endl; });
-	pc1.onGatheringStateChange([](PeerConnection::GatheringState state) {
-		cout << "Gathering state 1: " << state << endl;
-	});
 
-	pc2.onLocalDescription([&pc1](Description sdp) {
-		cout << "Description 2: " << sdp << endl;
-		pc1.setRemoteDescription(std::move(sdp));
-	});
-
-	pc2.onLocalCandidate([&pc1](Candidate candidate) {
-		cout << "Candidate 2: " << candidate << endl;
-		pc1.addRemoteCandidate(std::move(candidate));
-	});
-
+	pc2.onLocalDescription([&pc1](Description sdp) { pc1.setRemoteDescription(std::move(sdp)); });
+	pc2.onLocalCandidate(
+	    [&pc1](Candidate candidate) { pc1.addRemoteCandidate(std::move(candidate)); });
 	pc2.onStateChange([](PeerConnection::State state) { cout << "State 2: " << state << endl; });
-	pc2.onGatheringStateChange([](PeerConnection::GatheringState state) {
-		cout << "Gathering state 2: " << state << endl;
-	});
 
 	const size_t messageSize = 65535;
 	binary messageData(messageSize);
@@ -89,8 +82,6 @@ size_t benchmark(milliseconds duration) {
 			}
 		});
 
-		dc->onClosed([]() { cout << "DataChannel closed." << endl; });
-
 		std::atomic_store(&dc2, dc);
 	});
 
@@ -106,11 +97,10 @@ size_t benchmark(milliseconds duration) {
 
 		cout << "DataChannel open, sending data..." << endl;
 		try {
-			while (dc1->bufferedAmount() == 0) {
+			while (dc1->bufferedAmount() == 0)
 				dc1->send(messageData);
-			}
 		} catch (const std::exception &e) {
-			std::cout << "Send failed: " << e.what() << std::endl;
+			cout << "Send failed: " << e.what() << endl;
 		}
 	});
 
@@ -121,13 +111,11 @@ size_t benchmark(milliseconds duration) {
 		if (!dc1)
 			return;
 
-		// Continue sending
 		try {
-			while (dc1->isOpen() && dc1->bufferedAmount() == 0) {
+			while (dc1->isOpen() && dc1->bufferedAmount() == 0)
 				dc1->send(messageData);
-			}
 		} catch (const std::exception &e) {
-			std::cout << "Send failed: " << e.what() << std::endl;
+			cout << "Send failed: " << e.what() << endl;
 		}
 	});
 
@@ -136,6 +124,18 @@ size_t benchmark(milliseconds duration) {
 	for (int i = 0; i < steps; ++i) {
 		this_thread::sleep_for(stepDuration);
 		cout << "Received: " << receivedSize.load() / 1000 << " KB" << endl;
+	}
+
+	BenchResult result;
+	result.name = name;
+	result.connected = dc1->isOpen() && dc2 && dc2->isOpen();
+
+	if (server) {
+		if (auto relayType = pc1.selectedRelayType())
+			cout << "Selected relay type: " << int(*relayType) << endl;
+		else
+			cout << "Selected relay type: none (not relayed, or not reported by this backend)"
+			     << endl;
 	}
 
 	dc1->close();
@@ -150,29 +150,99 @@ size_t benchmark(milliseconds duration) {
 	cout << "Connect duration: " << connectDuration.count() << " ms" << endl;
 
 	size_t received = receivedSize.load();
-	size_t goodput = transferDuration.count() > 0 ? received / transferDuration.count() : 0;
-	cout << "Goodput: " << goodput * 0.001 << " MB/s"
-	     << " (" << goodput * 0.001 * 8 << " Mbit/s)" << endl;
+	result.goodput = transferDuration.count() > 0 ? received / transferDuration.count() : 0;
+	cout << "Goodput: " << result.goodput * 0.001 << " MB/s"
+	     << " (" << result.goodput * 0.001 * 8 << " Mbit/s)" << endl;
 
 	pc1.close();
 	pc2.close();
+
+	return result;
+}
+
+} // namespace
+
+size_t benchmark(milliseconds duration) {
+	rtc::InitLogger(LogLevel::Warning);
+	rtc::Preload();
+
+	size_t goodput = runBenchmark("Direct", duration).goodput;
 
 	rtc::Cleanup();
 	return goodput;
 }
 
 #ifdef BENCHMARK_MAIN
+
 int main(int argc, char **argv) {
-	try {
-		size_t goodput = benchmark(30s);
-		if (goodput == 0)
-			throw runtime_error("No data received");
+	rtc::InitLogger(LogLevel::Warning);
+	rtc::Preload();
 
-		return 0;
+	int durationMs = 10000;
+	if (const char *s = getenv("BENCH_DURATION_MS"))
+		durationMs = atoi(s);
+	milliseconds duration(durationMs);
 
-	} catch (const std::exception &e) {
-		cerr << "Benchmark failed: " << e.what() << endl;
-		return -1;
-	}
-}
+	vector<BenchResult> results;
+
+	results.push_back(runBenchmark("Direct (UDP, no relay)", duration));
+
+	const char *turnHost = getenv("TURN_HOST");
+	const char *turnPort = getenv("TURN_PORT");
+	const char *turnUsername = getenv("TURN_USERNAME");
+	const char *turnPassword = getenv("TURN_PASSWORD");
+	if (turnHost && turnPort && turnUsername && turnPassword) {
+		uint16_t port = uint16_t(stoul(turnPort));
+
+		results.push_back(runBenchmark(
+		    "TURN UDP", duration,
+		    IceServer(turnHost, port, turnUsername, turnPassword, IceServer::RelayType::TurnUdp)));
+
+#ifdef RTC_ENABLE_TURN_TCP
+		results.push_back(runBenchmark(
+		    "TURN TCP", duration,
+		    IceServer(turnHost, port, turnUsername, turnPassword, IceServer::RelayType::TurnTcp)));
 #endif
+	} else {
+		cout << endl
+		     << "TURN_HOST, TURN_PORT, TURN_USERNAME, and TURN_PASSWORD are not all set; "
+		        "skipping TURN UDP/TCP benchmarks"
+		     << endl;
+	}
+
+#ifdef RTC_ENABLE_TURN_TLS
+	const char *turnsHost = getenv("TURNS_HOST");
+	const char *turnsPort = getenv("TURNS_PORT");
+	const char *turnsUsername = getenv("TURNS_USERNAME");
+	const char *turnsPassword = getenv("TURNS_PASSWORD");
+	if (turnsHost && turnsPort && turnsUsername && turnsPassword) {
+		uint16_t port = uint16_t(stoul(turnsPort));
+
+		results.push_back(
+		    runBenchmark("TURN TLS", duration,
+		                 IceServer(turnsHost, port, turnsUsername, turnsPassword,
+		                           IceServer::RelayType::TurnTls)));
+	} else {
+		cout << endl
+		     << "TURNS_HOST, TURNS_PORT, TURNS_USERNAME, and TURNS_PASSWORD are not all set; "
+		        "skipping TURN TLS benchmark"
+		     << endl;
+	}
+#endif
+
+	rtc::Cleanup();
+
+	cout << endl << "=== Summary ===" << endl;
+	bool anyFailed = false;
+	for (const auto &r : results) {
+		if (!r.connected || r.goodput == 0)
+			anyFailed = true;
+
+		cout << r.name << ": " << (r.connected ? "connected" : "FAILED") << ", "
+		     << r.goodput * 0.001 << " MB/s (" << r.goodput * 0.001 * 8 << " Mbit/s)" << endl;
+	}
+
+	return anyFailed ? -1 : 0;
+}
+
+#endif // BENCHMARK_MAIN

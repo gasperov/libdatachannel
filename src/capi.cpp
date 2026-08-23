@@ -738,6 +738,25 @@ int rtcGetSelectedCandidatePair(int pc, char *local, int localSize, char *remote
 	});
 }
 
+int rtcGetSelectedRelayTransport(int pc) {
+	return wrap([&] {
+		auto peerConnection = getPeerConnection(pc);
+
+		auto relayType = peerConnection->selectedRelayType();
+		if (!relayType)
+			return RTC_ERR_NOT_AVAIL;
+
+		switch (*relayType) {
+		case IceServer::RelayType::TurnTcp:
+			return int(RTC_RELAY_TRANSPORT_TCP);
+		case IceServer::RelayType::TurnTls:
+			return int(RTC_RELAY_TRANSPORT_TLS);
+		default:
+			return int(RTC_RELAY_TRANSPORT_UDP);
+		}
+	});
+}
+
 bool rtcIsNegotiationNeeded(int pc) {
 	return wrap([&] { return getPeerConnection(pc)->negotiationNeeded() ? 0 : 1; }) == 0 ? true
 	                                                                                     : false;
