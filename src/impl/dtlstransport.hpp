@@ -96,6 +96,25 @@ protected:
 	static void SetTimerCallback(void *ctx, uint32_t int_ms, uint32_t fin_ms);
 	static int GetTimerCallback(void *ctx);
 
+#elif USE_SCHANNEL
+	CredHandle mCreds;
+	CtxtHandle mContext;
+	bool mContextValid = false;
+	SecPkgContext_StreamSizes mSizes = {};
+	std::recursive_mutex mSslMutex;
+
+	std::chrono::milliseconds mTimeout;
+
+	sockaddr_storage mPeerAddress = {};
+	ULONG mPeerAddressLen = 0;
+
+	// Returns true once the handshake is complete. A null message drives a retransmission.
+	bool handshake(const message_ptr &message);
+	void sendOutput(SecBuffer &buffer);
+	void verifyPeer();
+	void scheduleTimeout();
+	void resolvePeerAddress(const shared_ptr<IceTransport> &lower);
+
 #else // OPENSSL
 	SSL_CTX *mCtx = NULL;
 	SSL *mSsl = NULL;

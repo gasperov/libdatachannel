@@ -126,7 +126,9 @@ int runTurnRelayConnectivityMain(const char *url, rtcRelayTransport expectedRela
 	rtcSetOpenCallback(peer1->dc, openCallback);
 
 	{
-		int attempts = 10;
+		// Same budget as the C++ TURN test in turn_connectivity.cpp: allocating a relay over
+		// TCP or TLS can take appreciably longer than over UDP
+		int attempts = 20;
 		while ((!peer1->connected || !peer2->connected) && attempts--)
 			sleep(1);
 	}
