@@ -70,6 +70,45 @@ std::shared_ptr<mbedtls_x509_crt> new_x509_crt();
 
 } // namespace rtc::mbedtls
 
+#elif USE_SCHANNEL
+
+#ifndef SECURITY_WIN32
+#define SECURITY_WIN32
+#endif
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <windows.h>
+
+#include <bcrypt.h>
+#include <ncrypt.h>
+#include <schannel.h>
+#include <security.h>
+#include <sspi.h>
+#include <wincrypt.h>
+
+#if RTC_ENABLE_WEBSOCKET
+#error "SChannel does not implement the TLS transport used by WebSocket support yet, build with NO_WEBSOCKET=ON"
+#endif
+
+// SChannel exposes the pieces DTLS-SRTP needs (SECBUFFER_SRTP_PROTECTION_PROFILES to offer the
+// profiles, SECPKG_ATTR_SRTP_PARAMETERS to read the negotiated one, and SECPKG_ATTR_KEYING_MATERIAL
+// to export the keys), but they are not wired up here yet.
+#if RTC_ENABLE_MEDIA
+#error "SChannel does not implement DTLS-SRTP for media transport yet, build with NO_MEDIA=ON"
+#endif
+
+namespace rtc::schannel {
+
+void init();
+
+string error_string(long status);
+
+bool check(long status, const string &message = "SChannel error");
+
+} // namespace rtc::schannel
+
 #else // OPENSSL
 
 #ifdef _WIN32
