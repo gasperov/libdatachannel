@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -390,6 +391,311 @@ std::tuple<shared_ptr<mbedtls_x509_crt>, shared_ptr<mbedtls_pk_context>>
 Certificate::credentials() const {
 	return {mCrt, mPk};
 }
+
+#elif USE_SCHANNEL
+
+namespace {
+
+NCRYPT_PROV_HANDLE open_provider() {
+	NCRYPT_PROV_HANDLE prov = 0;
+	schannel::check(NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0),
+	                "Failed to open CNG key storage provider");
+	return prov;
+}
+
+// SChannel resolves the private key by key container name rather than through an in-process
+// handle, so each certificate gets its own named key, deleted again when the certificate is freed.
+std::wstring make_key_name() {
+	unsigned char random[16];
+	if (BCryptGenRandom(nullptr, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+		throw std::runtime_error("Unable to generate key container name");
+
+	std::wostringstream oss;
+	oss << L"libdatachannel-" << std::hex << std::setfill(L'0');
+	for (auto b : random)
+		oss << std::setw(2) << unsigned(b);
+
+	return oss.str();
+}
+
+void free_cert(const CERT_CONTEXT *cert) {
+	if (!cert)
+		return;
+
+	DWORD size = 0;
+	if (CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, nullptr, &size) &&
+	    size > 0) {
+		std::vector<BYTE> buffer(size);
+		auto *info = reinterpret_cast<CRYPT_KEY_PROV_INFO *>(buffer.data());
+		if (CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, info, &size)) {
+			NCRYPT_PROV_HANDLE prov = 0;
+			if (NCryptOpenStorageProvider(&prov, info->pwszProvName, 0) == ERROR_SUCCESS) {
+				NCRYPT_KEY_HANDLE key = 0;
+				if (NCryptOpenKey(prov, &key, info->pwszContainerName, 0, NCRYPT_SILENT_FLAG) ==
+				    ERROR_SUCCESS)
+					NCryptDeleteKey(key, NCRYPT_SILENT_FLAG); // also frees the handle
+				NCryptFreeObject(prov);
+			}
+		}
+	}
+
+	CertFreeCertificateContext(cert);
+}
+
+void set_cert_key(PCCERT_CONTEXT cert, const std::wstring &keyName) {
+	CRYPT_KEY_PROV_INFO info = {};
+	info.pwszContainerName = const_cast<LPWSTR>(keyName.c_str());
+	info.pwszProvName = const_cast<LPWSTR>(MS_KEY_STORAGE_PROVIDER);
+	info.dwProvType = 0; // CNG
+	info.dwKeySpec = 0;
+
+	if (!CertSetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, 0, &info))
+		throw std::runtime_error("Unable to attach private key to certificate: " +
+		                         schannel::error_string(static_cast<long>(GetLastError())));
+}
+
+std::vector<BYTE> pem_to_der(const string &pem) {
+	DWORD size = 0;
+	if (!CryptStringToBinaryA(pem.data(), DWORD(pem.size()), CRYPT_STRING_BASE64HEADER, nullptr,
+	                          &size, nullptr, nullptr))
+		throw std::invalid_argument("Unable to parse PEM block");
+
+	std::vector<BYTE> der(size);
+	if (!CryptStringToBinaryA(pem.data(), DWORD(pem.size()), CRYPT_STRING_BASE64HEADER, der.data(),
+	                          &size, nullptr, nullptr))
+		throw std::invalid_argument("Unable to decode PEM block");
+
+	der.resize(size);
+	return der;
+}
+
+// Only PKCS#8 blobs can be imported under a key container name, which SChannel requires to find
+// the key again later
+NCRYPT_KEY_HANDLE import_key(NCRYPT_PROV_HANDLE prov, const std::vector<BYTE> &der,
+                             const std::wstring &keyName) {
+	NCryptBuffer nameBuffer = {};
+	nameBuffer.BufferType = NCRYPTBUFFER_PKCS_KEY_NAME;
+	nameBuffer.cbBuffer = ULONG((keyName.size() + 1) * sizeof(wchar_t));
+	nameBuffer.pvBuffer = const_cast<wchar_t *>(keyName.c_str());
+
+	NCryptBufferDesc params = {};
+	params.ulVersion = NCRYPTBUFFER_VERSION;
+	params.cBuffers = 1;
+	params.pBuffers = &nameBuffer;
+
+	NCRYPT_KEY_HANDLE key = 0;
+	schannel::check(NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, &params, &key,
+	                                const_cast<PBYTE>(der.data()), DWORD(der.size()),
+	                                NCRYPT_OVERWRITE_KEY_FLAG | NCRYPT_SILENT_FLAG),
+	                "Unable to import PEM key (only PKCS#8 keys are supported with SChannel)");
+
+	return key;
+}
+
+} // namespace
+
+string make_fingerprint(PCCERT_CONTEXT cert,
+                        CertificateFingerprint::Algorithm fingerprintAlgorithm) {
+	LPCWSTR hashFunc;
+	switch (fingerprintAlgorithm) {
+	case CertificateFingerprint::Algorithm::Sha1:
+		hashFunc = BCRYPT_SHA1_ALGORITHM;
+		break;
+	case CertificateFingerprint::Algorithm::Sha256:
+		hashFunc = BCRYPT_SHA256_ALGORITHM;
+		break;
+	case CertificateFingerprint::Algorithm::Sha384:
+		hashFunc = BCRYPT_SHA384_ALGORITHM;
+		break;
+	case CertificateFingerprint::Algorithm::Sha512:
+		hashFunc = BCRYPT_SHA512_ALGORITHM;
+		break;
+	default:
+		// SHA-224 has no BCrypt algorithm identifier
+		throw std::invalid_argument("Unsupported fingerprint algorithm");
+	}
+
+	const size_t size = CertificateFingerprint::AlgorithmSize(fingerprintAlgorithm);
+	std::vector<unsigned char> buffer(size);
+	auto len = DWORD(size);
+
+	if (!CryptHashCertificate2(hashFunc, 0, nullptr, cert->pbCertEncoded, cert->cbCertEncoded,
+	                           buffer.data(), &len))
+		throw std::runtime_error("X509 fingerprint error: " +
+		                         schannel::error_string(static_cast<long>(GetLastError())));
+
+	std::ostringstream oss;
+	oss << std::hex << std::uppercase << std::setfill('0');
+	for (DWORD i = 0; i < len; ++i) {
+		if (i)
+			oss << std::setw(1) << ':';
+		oss << std::setw(2) << unsigned(buffer.at(i));
+	}
+	return oss.str();
+}
+
+Certificate::Certificate(shared_ptr<const CERT_CONTEXT> cert)
+    : mCert(std::move(cert)),
+      mFingerprint(make_fingerprint(mCert.get(), CertificateFingerprint::Algorithm::Sha256)) {}
+
+Certificate Certificate::FromString(string crt_pem, string key_pem) {
+	PLOG_DEBUG << "Importing certificate from PEM string (SChannel)";
+
+	auto crtDer = pem_to_der(crt_pem);
+	auto keyDer = pem_to_der(key_pem);
+
+	PCCERT_CONTEXT cert =
+	    CertCreateCertificateContext(X509_ASN_ENCODING, crtDer.data(), DWORD(crtDer.size()));
+	if (!cert)
+		throw std::invalid_argument("Unable to import PEM certificate");
+
+	const std::wstring keyName = make_key_name();
+
+	NCRYPT_PROV_HANDLE prov = 0;
+	NCRYPT_KEY_HANDLE key = 0;
+	try {
+		prov = open_provider();
+		key = import_key(prov, keyDer, keyName);
+		set_cert_key(cert, keyName);
+	} catch (...) {
+		CertFreeCertificateContext(cert);
+		if (key)
+			NCryptDeleteKey(key, NCRYPT_SILENT_FLAG);
+		if (prov)
+			NCryptFreeObject(prov);
+		throw;
+	}
+
+	NCryptFreeObject(key);
+	NCryptFreeObject(prov);
+	return Certificate(shared_ptr<const CERT_CONTEXT>(cert, free_cert));
+}
+
+Certificate Certificate::FromFile(const string &crt_pem_file, const string &key_pem_file,
+                                  const string &pass) {
+	PLOG_DEBUG << "Importing certificate from PEM file (SChannel): " << crt_pem_file;
+
+	if (!pass.empty())
+		throw std::invalid_argument("Encrypted PEM keys are not supported with SChannel");
+
+	auto read = [](const string &filename) -> string {
+		std::ifstream ifs(filename, std::ifstream::in | std::ifstream::binary);
+		if (!ifs.is_open())
+			throw std::invalid_argument("Unable to open PEM file: " + filename);
+
+		return string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+	};
+
+	return FromString(read(crt_pem_file), read(key_pem_file));
+}
+
+Certificate Certificate::Generate(CertificateType type, const string &commonName) {
+	PLOG_DEBUG << "Generating certificate (SChannel)";
+
+	LPCWSTR algorithm;
+	LPSTR signatureOid;
+	DWORD length = 0;
+	switch (type) {
+	// RFC 8827 WebRTC Security Architecture 6.5. Communications Security
+	// All implementations MUST support DTLS 1.2 with the TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+	// cipher suite and the P-256 curve
+	// See https://www.rfc-editor.org/rfc/rfc8827.html#section-6.5
+	case CertificateType::Default:
+	case CertificateType::Ecdsa:
+		algorithm = NCRYPT_ECDSA_P256_ALGORITHM;
+		signatureOid = const_cast<LPSTR>(szOID_ECDSA_SHA256);
+		break;
+	case CertificateType::Rsa:
+		algorithm = NCRYPT_RSA_ALGORITHM;
+		signatureOid = const_cast<LPSTR>(szOID_RSA_SHA256RSA);
+		length = 2048;
+		break;
+	default:
+		throw std::invalid_argument("Unknown certificate type");
+	}
+
+	const std::wstring keyName = make_key_name();
+
+	NCRYPT_PROV_HANDLE prov = open_provider();
+	NCRYPT_KEY_HANDLE key = 0;
+	PCCERT_CONTEXT cert = nullptr;
+	try {
+		// NCRYPT_SILENT_FLAG guarantees the provider never displays any UI
+		schannel::check(NCryptCreatePersistedKey(prov, &key, algorithm, keyName.c_str(), 0,
+		                                         NCRYPT_OVERWRITE_KEY_FLAG | NCRYPT_SILENT_FLAG),
+		                "Unable to create key pair");
+
+		if (length)
+			schannel::check(NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY,
+			                                  reinterpret_cast<PBYTE>(&length), sizeof(length),
+			                                  NCRYPT_SILENT_FLAG),
+			                "Unable to set key length");
+
+		schannel::check(NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG), "Unable to generate key pair");
+
+		std::wstring subject(commonName.begin(), commonName.end());
+		subject = L"CN=" + subject;
+
+		DWORD nameSize = 0;
+		if (!CertStrToNameW(X509_ASN_ENCODING, subject.c_str(), CERT_X500_NAME_STR, nullptr, nullptr,
+		                    &nameSize, nullptr))
+			throw std::runtime_error("Unable to encode certificate subject name");
+
+		std::vector<BYTE> nameBuffer(nameSize);
+		if (!CertStrToNameW(X509_ASN_ENCODING, subject.c_str(), CERT_X500_NAME_STR, nullptr,
+		                    nameBuffer.data(), &nameSize, nullptr))
+			throw std::runtime_error("Unable to encode certificate subject name");
+
+		CERT_NAME_BLOB subjectBlob = {nameSize, nameBuffer.data()};
+
+		CRYPT_ALGORITHM_IDENTIFIER signature = {};
+		signature.pszObjId = signatureOid;
+
+		const ULONGLONG second = 10000000ULL; // in 100ns intervals
+		FILETIME fileTime;
+		GetSystemTimeAsFileTime(&fileTime);
+		ULARGE_INTEGER now;
+		now.LowPart = fileTime.dwLowDateTime;
+		now.HighPart = fileTime.dwHighDateTime;
+
+		ULARGE_INTEGER before = now, after = now;
+		before.QuadPart -= 3600ULL * second;
+		after.QuadPart += 24ULL * 365 * 3600 * second;
+
+		FILETIME beforeTime = {before.LowPart, before.HighPart};
+		FILETIME afterTime = {after.LowPart, after.HighPart};
+
+		SYSTEMTIME notBefore, notAfter;
+		FileTimeToSystemTime(&beforeTime, &notBefore);
+		FileTimeToSystemTime(&afterTime, &notAfter);
+
+		// Passing the key container info explicitly avoids the provider query the call would
+		// otherwise perform to build it, which not all providers support
+		CRYPT_KEY_PROV_INFO keyProvInfo = {};
+		keyProvInfo.pwszContainerName = const_cast<LPWSTR>(keyName.c_str());
+		keyProvInfo.pwszProvName = const_cast<LPWSTR>(MS_KEY_STORAGE_PROVIDER);
+		keyProvInfo.dwProvType = 0; // CNG
+		keyProvInfo.dwKeySpec = 0;
+
+		cert = CertCreateSelfSignCertificate(key, &subjectBlob, 0, &keyProvInfo, &signature,
+		                                     &notBefore, &notAfter, nullptr);
+		if (!cert)
+			throw std::runtime_error("Unable to auto-sign certificate: " +
+			                         schannel::error_string(static_cast<long>(GetLastError())));
+
+	} catch (...) {
+		if (key)
+			NCryptDeleteKey(key, NCRYPT_SILENT_FLAG);
+		NCryptFreeObject(prov);
+		throw;
+	}
+
+	NCryptFreeObject(key);
+	NCryptFreeObject(prov);
+	return Certificate(shared_ptr<const CERT_CONTEXT>(cert, free_cert));
+}
+
+PCCERT_CONTEXT Certificate::credentials() const { return mCert.get(); }
 
 #else // OPENSSL
 

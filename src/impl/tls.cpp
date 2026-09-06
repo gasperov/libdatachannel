@@ -75,6 +75,10 @@ gnutls_datum_t make_datum(char *data, size_t size) {
 #if defined(MBEDTLS_THREADING_ALT) && defined(_WIN32)
 #include <windows.h>
 #include "mbedtls/threading.h"
+
+#if defined(MBEDTLS_VERSION_MAJOR) && MBEDTLS_VERSION_MAJOR < 4
+#error "MBEDTLS_THREADING_ALT on Windows requires Mbed TLS 4.x (or remove MBEDTLS_THREADING_ALT from the Mbed TLS configuration)"
+#endif
 #endif
 
 namespace {
@@ -229,6 +233,51 @@ std::shared_ptr<mbedtls_x509_crt> new_x509_crt() {
 }
 
 } // namespace rtc::mbedtls
+
+#elif USE_SCHANNEL
+
+#include <iomanip>
+#include <sstream>
+
+namespace rtc::schannel {
+
+void init() {
+	// Nothing to do, SChannel is provided by the system
+}
+
+string error_string(long status) {
+	string message;
+
+	char *buffer = nullptr;
+	DWORD count = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+	                                 FORMAT_MESSAGE_IGNORE_INSERTS,
+	                             nullptr, static_cast<DWORD>(status),
+	                             MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+	                             reinterpret_cast<char *>(&buffer), 0, nullptr);
+	if (buffer) {
+		message.assign(buffer, count);
+		LocalFree(buffer);
+	}
+
+	while (!message.empty() &&
+	       (message.back() == '\r' || message.back() == '\n' || message.back() == ' '))
+		message.pop_back();
+
+	std::ostringstream oss;
+	oss << "0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+	    << static_cast<uint32_t>(status);
+
+	return !message.empty() ? message + " (" + oss.str() + ")" : oss.str();
+}
+
+bool check(long status, const string &message) {
+	if (status < 0)
+		throw std::runtime_error(message + ": " + error_string(status));
+
+	return true;
+}
+
+} // namespace rtc::schannel
 
 #else // OPENSSL
 

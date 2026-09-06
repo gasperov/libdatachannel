@@ -139,6 +139,8 @@ void Init::doInit() {
 	// Nothing to do
 #elif USE_MBEDTLS
 	mbedtls::init();
+#elif USE_SCHANNEL
+	schannel::init();
 #else
 	openssl::init();
 #endif

@@ -691,6 +691,486 @@ int DtlsTransport::GetTimerCallback(void *ctx) {
 	}
 }
 
+#elif USE_SCHANNEL
+
+void DtlsTransport::Init() {
+	// Nothing to do
+}
+
+void DtlsTransport::Cleanup() {
+	// Nothing to do
+}
+
+DtlsTransport::DtlsTransport(shared_ptr<IceTransport> lower, certificate_ptr certificate,
+                             optional<size_t> mtu,
+                             CertificateFingerprint::Algorithm fingerprintAlgorithm,
+                             verifier_callback verifierCallback, state_callback stateChangeCallback)
+    : Transport(lower, std::move(stateChangeCallback)), mMtu(mtu),
+      mCertificate(std::move(certificate)), mFingerprintAlgorithm(fingerprintAlgorithm),
+      mVerifierCallback(std::move(verifierCallback)),
+      mIsClient(lower->role() == Description::Role::Active),
+      mIncomingQueue(RECV_QUEUE_LIMIT, message_size_func), mTimeout(1000ms) {
+
+	PLOG_DEBUG << "Initializing DTLS transport (SChannel)";
+
+	if (!mCertificate)
+		throw std::invalid_argument("DTLS certificate is null");
+
+	SecInvalidateHandle(&mCreds);
+	SecInvalidateHandle(&mContext);
+
+	resolvePeerAddress(lower);
+
+	PCCERT_CONTEXT cert = mCertificate->credentials();
+
+	SCHANNEL_CRED creds = {};
+	creds.dwVersion = SCHANNEL_CRED_VERSION;
+	creds.cCreds = 1;
+	creds.paCred = &cert;
+	// grbitEnabledProtocols is left at zero to accept the system defaults, as the datagram request
+	// flag on the context already restricts the negotiation to DTLS.
+	//
+	// RFC 8827: WebRTC peers authenticate with self-signed certificates checked against the
+	// fingerprint from the SDP, so the system trust chain must not be consulted. Note that
+	// SCH_CRED_NO_DEFAULT_CREDS must not be set, or the client would not send its certificate.
+	// See https://www.rfc-editor.org/rfc/rfc8827.html#section-6.5
+	creds.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION;
+
+	TimeStamp expiry;
+	schannel::check(AcquireCredentialsHandleA(nullptr, const_cast<LPSTR>(UNISP_NAME_A),
+	                                          mIsClient ? SECPKG_CRED_OUTBOUND
+	                                                    : SECPKG_CRED_INBOUND,
+	                                          nullptr, &creds, nullptr, nullptr, &mCreds, &expiry),
+	                "Failed to acquire SChannel credentials");
+
+	// Set recommended medium-priority DSCP value for handshake
+	// See https://www.rfc-editor.org/rfc/rfc8837.html#section-5
+	mCurrentDscp = 10; // AF11: Assured Forwarding class 1, low drop probability
+}
+
+DtlsTransport::~DtlsTransport() {
+	stop();
+
+	PLOG_DEBUG << "Destroying DTLS transport";
+
+	std::lock_guard lock(mSslMutex);
+	if (mContextValid)
+		DeleteSecurityContext(&mContext);
+	if (SecIsValidHandle(&mCreds))
+		FreeCredentialsHandle(&mCreds);
+}
+
+void DtlsTransport::start() {
+	PLOG_DEBUG << "Starting DTLS transport";
+	registerIncoming();
+	changeState(State::Connecting);
+
+	if (mIsClient) {
+		// Initiate the handshake
+		std::lock_guard lock(mSslMutex);
+		handshake(nullptr);
+	}
+
+	scheduleTimeout();
+}
+
+void DtlsTransport::stop() {
+	PLOG_DEBUG << "Stopping DTLS transport";
+	unregisterIncoming();
+	mIncomingQueue.stop();
+	enqueueRecv();
+}
+
+bool DtlsTransport::send(message_ptr message) {
+	if (!message || state() != State::Connected)
+		return false;
+
+	PLOG_VERBOSE << "Send size=" << message->size();
+
+	std::lock_guard lock(mSslMutex);
+
+	if (message->size() > size_t(mSizes.cbMaximumMessage)) {
+		PLOG_WARNING << "DTLS message too large, dropping: size=" << message->size()
+		             << ", maximum=" << mSizes.cbMaximumMessage;
+		return false;
+	}
+
+	binary buffer(size_t(mSizes.cbHeader) + message->size() + mSizes.cbTrailer);
+	std::memcpy(buffer.data() + mSizes.cbHeader, message->data(), message->size());
+
+	SecBuffer buffers[4] = {};
+	buffers[0].BufferType = SECBUFFER_STREAM_HEADER;
+	buffers[0].pvBuffer = buffer.data();
+	buffers[0].cbBuffer = mSizes.cbHeader;
+	buffers[1].BufferType = SECBUFFER_DATA;
+	buffers[1].pvBuffer = buffer.data() + mSizes.cbHeader;
+	buffers[1].cbBuffer = ULONG(message->size());
+	buffers[2].BufferType = SECBUFFER_STREAM_TRAILER;
+	buffers[2].pvBuffer = buffer.data() + mSizes.cbHeader + message->size();
+	buffers[2].cbBuffer = mSizes.cbTrailer;
+	buffers[3].BufferType = SECBUFFER_EMPTY;
+	SecBufferDesc desc = {SECBUFFER_VERSION, 4, buffers};
+
+	mCurrentDscp = message->dscp;
+	schannel::check(EncryptMessage(&mContext, 0, &desc, 0), "Failed to encrypt message");
+
+	const size_t size = size_t(buffers[0].cbBuffer) + buffers[1].cbBuffer + buffers[2].cbBuffer;
+	outgoing(make_message(buffer.begin(), buffer.begin() + size));
+
+	return mOutgoingResult;
+}
+
+void DtlsTransport::incoming(message_ptr message) {
+	if (!message) {
+		mIncomingQueue.stop();
+		enqueueRecv();
+		return;
+	}
+
+	PLOG_VERBOSE << "Incoming size=" << message->size();
+	mIncomingQueue.push(std::move(message));
+	enqueueRecv();
+}
+
+bool DtlsTransport::outgoing(message_ptr message) {
+	message->dscp = mCurrentDscp;
+
+	bool result = Transport::outgoing(std::move(message));
+	mOutgoingResult = result;
+	return result;
+}
+
+bool DtlsTransport::demuxMessage(message_ptr) {
+	// Dummy
+	return false;
+}
+
+void DtlsTransport::postHandshake() {
+	// Dummy
+}
+
+void DtlsTransport::sendOutput(SecBuffer &buffer) {
+	auto b = reinterpret_cast<const byte *>(buffer.pvBuffer);
+	outgoing(make_message(b, b + buffer.cbBuffer));
+}
+
+void DtlsTransport::verifyPeer() {
+	// mSslMutex must be locked
+	PCCERT_CONTEXT peer = nullptr;
+	schannel::check(QueryContextAttributes(&mContext, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &peer),
+	                "Failed to get peer certificate");
+
+	if (!peer)
+		throw std::runtime_error("No peer certificate");
+
+	string fingerprint;
+	try {
+		fingerprint = make_fingerprint(peer, mFingerprintAlgorithm);
+	} catch (...) {
+		CertFreeCertificateContext(peer);
+		throw;
+	}
+	CertFreeCertificateContext(peer);
+
+	if (!mVerifierCallback(fingerprint))
+		throw std::runtime_error("Peer certificate verification failed");
+}
+
+void DtlsTransport::resolvePeerAddress(const shared_ptr<IceTransport> &lower) {
+	// SChannel derives the DTLS HelloVerifyRequest cookie from the peer address, so it has to be
+	// handed one. It only needs to stay identical across the two exchanges of the handshake, hence
+	// the placeholder if no candidate pair is selected yet.
+	auto *placeholder = reinterpret_cast<sockaddr_in *>(&mPeerAddress);
+	placeholder->sin_family = AF_INET;
+	mPeerAddressLen = ULONG(sizeof(sockaddr_in));
+
+	Candidate local, remote;
+	if (!lower || !lower->getSelectedCandidatePair(&local, &remote))
+		return;
+
+	auto address = remote.address();
+	auto port = remote.port();
+	if (!address || !port)
+		return;
+
+	sockaddr_in6 sin6 = {};
+	if (InetPtonA(AF_INET6, address->c_str(), &sin6.sin6_addr) == 1) {
+		sin6.sin6_family = AF_INET6;
+		sin6.sin6_port = htons(*port);
+		std::memcpy(&mPeerAddress, &sin6, sizeof(sin6));
+		mPeerAddressLen = ULONG(sizeof(sin6));
+		return;
+	}
+
+	sockaddr_in sin = {};
+	if (InetPtonA(AF_INET, address->c_str(), &sin.sin_addr) == 1) {
+		sin.sin_family = AF_INET;
+		sin.sin_port = htons(*port);
+		std::memcpy(&mPeerAddress, &sin, sizeof(sin));
+		mPeerAddressLen = ULONG(sizeof(sin));
+	}
+}
+
+bool DtlsTransport::handshake(const message_ptr &message) {
+	// mSslMutex must be locked
+
+	// A null message re-runs the exchange with no input, which makes SChannel retransmit the
+	// last flight (or, for a client with no context yet, emit the initial ClientHello).
+	// Without this SChannel picks a conservative record size that is smaller than the packets the
+	// SCTP layer produces, and every one of them would then fail to send. It also bounds the
+	// handshake flights. See RFC 6347 section 4.2.3.
+	SEC_DTLS_MTU dtlsMtu = {};
+	dtlsMtu.PathMTU = static_cast<unsigned short>(mMtu.value_or(DEFAULT_MTU) - 8 - 40); // UDP/IPv6
+
+	bool first = true;
+	while (true) {
+		// Passing no input at all makes SChannel regenerate the previous flight, which is both
+		// how a retransmission is triggered and how the next fragment is pulled out
+		const bool hasInput = first && message;
+
+		SecBuffer inputBuffers[4] = {};
+		inputBuffers[0].BufferType = SECBUFFER_TOKEN;
+		if (hasInput) {
+			inputBuffers[0].pvBuffer = const_cast<byte *>(message->data());
+			inputBuffers[0].cbBuffer = ULONG(message->size());
+		}
+		inputBuffers[1].BufferType = SECBUFFER_EMPTY;
+
+		ULONG inputCount = 2;
+		if (!mIsClient) {
+			// The server must be given the peer address to seed the HelloVerifyRequest cookie
+			// with, otherwise AcceptSecurityContext fails with SEC_E_INVALID_PARAMETER. This is
+			// undocumented.
+			inputBuffers[inputCount].BufferType = SECBUFFER_EXTRA;
+			inputBuffers[inputCount].pvBuffer = &mPeerAddress;
+			inputBuffers[inputCount].cbBuffer = mPeerAddressLen;
+			++inputCount;
+		}
+
+		inputBuffers[inputCount].BufferType = SECBUFFER_DTLS_MTU;
+		inputBuffers[inputCount].pvBuffer = &dtlsMtu;
+		inputBuffers[inputCount].cbBuffer = ULONG(sizeof(dtlsMtu));
+		++inputCount;
+
+		SecBufferDesc input = {SECBUFFER_VERSION, inputCount, inputBuffers};
+
+		SecBuffer outputBuffers[2] = {};
+		outputBuffers[0].BufferType = SECBUFFER_TOKEN;
+		outputBuffers[1].BufferType = SECBUFFER_ALERT;
+		SecBufferDesc output = {SECBUFFER_VERSION, 2, outputBuffers};
+
+		ULONG flags = 0;
+		TimeStamp expiry;
+		SECURITY_STATUS ret;
+		if (mIsClient) {
+			const ULONG requestFlags = ISC_REQ_DATAGRAM | ISC_REQ_CONFIDENTIALITY |
+			                           ISC_REQ_EXTENDED_ERROR | ISC_REQ_MANUAL_CRED_VALIDATION |
+			                           ISC_REQ_USE_SUPPLIED_CREDS | ISC_REQ_ALLOCATE_MEMORY;
+			// The same context handle is passed as both input and output on every call after
+			// the first, despite what the documentation suggests. There is no target name to
+			// check against, as the peer is authenticated by its SDP fingerprint.
+			//
+			// The descriptor is also passed on the very first call, which carries no token yet,
+			// so that the MTU is applied to the context being created. Afterwards it is only
+			// passed when there is a token, as omitting it is what drives retransmission.
+			const bool provideInput = hasInput || !mContextValid;
+			ret = InitializeSecurityContextA(&mCreds, mContextValid ? &mContext : nullptr, nullptr,
+			                                 requestFlags, 0, 0, provideInput ? &input : nullptr, 0,
+			                                 &mContext, &output, &flags, &expiry);
+		} else {
+			// RFC 8827: the server side must request the client certificate, as both peers
+			// authenticate with their SDP fingerprint
+			const ULONG requestFlags = ASC_REQ_DATAGRAM | ASC_REQ_CONFIDENTIALITY |
+			                           ASC_REQ_EXTENDED_ERROR | ASC_REQ_MUTUAL_AUTH |
+			                           ASC_REQ_ALLOCATE_MEMORY;
+			// Unlike the client, the server is always passed an input descriptor, even with an
+			// empty token, because it carries the peer address the cookie is derived from
+			ret = AcceptSecurityContext(&mCreds, mContextValid ? &mContext : nullptr, &input,
+			                            requestFlags, 0, &mContext, &output, &flags, &expiry);
+		}
+
+		if (!mContextValid && ret >= 0)
+			mContextValid = true;
+
+		if (outputBuffers[0].cbBuffer > 0)
+			sendOutput(outputBuffers[0]);
+		if (ret < 0 && outputBuffers[1].cbBuffer > 0)
+			sendOutput(outputBuffers[1]); // alert
+
+		for (auto &b : outputBuffers)
+			if (b.pvBuffer)
+				FreeContextBuffer(b.pvBuffer);
+
+		// The datagram was truncated or not a complete record, drop it
+		if (ret == SEC_E_INCOMPLETE_MESSAGE)
+			return false;
+
+		schannel::check(ret, mIsClient ? "Handshake failed (InitializeSecurityContext)"
+		                               : "Handshake failed (AcceptSecurityContext)");
+
+		// More output to flush before the peer can answer
+		if (ret == SEC_I_MESSAGE_FRAGMENT) {
+			first = false;
+			continue;
+		}
+
+		if (ret != SEC_E_OK)
+			return false; // SEC_I_CONTINUE_NEEDED
+
+		verifyPeer();
+		schannel::check(QueryContextAttributes(&mContext, SECPKG_ATTR_STREAM_SIZES, &mSizes),
+		                "Failed to query datagram sizes");
+		PLOG_DEBUG << "DTLS sizes: header=" << mSizes.cbHeader << ", trailer=" << mSizes.cbTrailer
+		           << ", maximumMessage=" << mSizes.cbMaximumMessage;
+		return true;
+	}
+}
+
+void DtlsTransport::scheduleTimeout() {
+	ThreadPool::Instance().schedule(mTimeout, [weak_this = weak_from_this()]() {
+		auto locked = weak_this.lock();
+		if (!locked || locked->state() != State::Connecting)
+			return;
+
+		try {
+			std::lock_guard lock(locked->mSslMutex);
+
+			// RFC 6347: the retransmission timer backs off exponentially from the recommended 1s.
+			// See https://www.rfc-editor.org/rfc/rfc6347.html#section-4.2.4.1
+			locked->mTimeout *= 2;
+			if (locked->mTimeout > 30s)
+				throw std::runtime_error("Handshake timeout");
+
+			// There is nothing to retransmit until a flight has been sent, which for the passive
+			// side only happens once the peer's first flight arrives
+			if (locked->mContextValid) {
+				PLOG_VERBOSE << "DTLS retransmit, timeout is " << locked->mTimeout.count() << "ms";
+				locked->handshake(nullptr);
+			}
+
+		} catch (const std::exception &e) {
+			PLOG_ERROR << "DTLS handshake failed: " << e.what();
+			locked->changeState(State::Failed);
+			return;
+		}
+
+		locked->scheduleTimeout();
+	});
+}
+
+void DtlsTransport::doRecv() {
+	std::lock_guard lock(mRecvMutex);
+	--mPendingRecvCount;
+
+	if (state() != State::Connecting && state() != State::Connected)
+		return;
+
+	try {
+		while (mIncomingQueue.running()) {
+			auto next = mIncomingQueue.pop();
+			if (!next)
+				return; // No more messages for now
+
+			message_ptr message = std::move(*next);
+			if (demuxMessage(message))
+				continue;
+
+			if (state() == State::Connecting) {
+				bool finished;
+				{
+					std::lock_guard sslLock(mSslMutex);
+
+					// The peer answered, so restart the retransmission back-off
+					mTimeout = 1000ms;
+					finished = handshake(message);
+				}
+
+				if (!finished)
+					continue;
+
+				// mSslMutex must not be held here: changing the state makes the upper layer
+				// create the SCTP transport synchronously, and usrsctp's write callback takes
+				// mSslMutex from another thread while holding the SCTP instances lock.
+				PLOG_INFO << "DTLS handshake finished";
+				postHandshake();
+				changeState(State::Connected);
+				continue;
+			}
+
+			binary buffer(message->begin(), message->end());
+
+			// A datagram may hold several coalesced records, which SChannel reports one at a
+			// time and hands the remainder back as SECBUFFER_EXTRA
+			std::vector<message_ptr> plaintext;
+			bool expired = false;
+			{
+				std::lock_guard sslLock(mSslMutex);
+
+				byte *data = buffer.data();
+				size_t size = buffer.size();
+				while (size > 0) {
+					SecBuffer buffers[4] = {};
+					buffers[0].BufferType = SECBUFFER_DATA;
+					buffers[0].pvBuffer = data;
+					buffers[0].cbBuffer = ULONG(size);
+					buffers[1].BufferType = SECBUFFER_EMPTY;
+					buffers[2].BufferType = SECBUFFER_EMPTY;
+					buffers[3].BufferType = SECBUFFER_EMPTY;
+					SecBufferDesc desc = {SECBUFFER_VERSION, 4, buffers};
+
+					SECURITY_STATUS ret = DecryptMessage(&mContext, &desc, 0, nullptr);
+
+					if (ret == SEC_I_CONTEXT_EXPIRED) {
+						PLOG_DEBUG << "DTLS connection cleanly closed";
+						expired = true;
+						break;
+					}
+
+					// The datagram was truncated or replayed, drop it
+					if (ret == SEC_E_INCOMPLETE_MESSAGE)
+						break;
+
+					schannel::check(ret, "Failed to decrypt message");
+
+					const SecBuffer *extra = nullptr;
+					for (const auto &b : buffers) {
+						if (b.BufferType == SECBUFFER_DATA && b.cbBuffer > 0) {
+							auto *p = reinterpret_cast<byte *>(b.pvBuffer);
+							plaintext.push_back(make_message(p, p + b.cbBuffer));
+						} else if (b.BufferType == SECBUFFER_EXTRA && b.cbBuffer > 0) {
+							extra = &b;
+						}
+					}
+
+					if (!extra)
+						break;
+
+					data = reinterpret_cast<byte *>(extra->pvBuffer);
+					size = extra->cbBuffer;
+				}
+			}
+
+			// Delivered outside the lock, as the upper layer re-enters the transport
+			for (auto &m : plaintext)
+				recv(std::move(m));
+
+			if (expired)
+				break;
+		}
+	} catch (const std::exception &e) {
+		PLOG_ERROR << "DTLS recv: " << e.what();
+	}
+
+	if (state() == State::Connected) {
+		PLOG_INFO << "DTLS closed";
+		changeState(State::Disconnected);
+		recv(nullptr);
+	} else {
+		PLOG_ERROR << "DTLS handshake failed";
+		changeState(State::Failed);
+	}
+}
+
 #else // OPENSSL
 
 BIO_METHOD *DtlsTransport::BioMethods = nullptr;

@@ -25,6 +25,7 @@ TestResult test_connectivity();
 TestResult test_connectivity_fail_on_wrong_fingerprint();
 TestResult test_pem();
 TestResult test_negotiated();
+TestResult test_large_message();
 TestResult test_reliability();
 TestResult test_simulcast_sdp_generation();
 TestResult test_simulcast_sdp_parsing();
@@ -108,6 +109,7 @@ static const vector<Test> tests = {
     Test("WebRTC TURN-TLS connectivity", test_turn_tls_connectivity),
 #endif
     Test("WebRTC negotiated DataChannel", test_negotiated),
+    Test("WebRTC large message", test_large_message),
     Test("WebRTC reliability mode", test_reliability),
     Test("WebRTC simulcast SDP generation", test_simulcast_sdp_generation),
     Test("WebRTC simulcast SDP parsing", test_simulcast_sdp_parsing),
