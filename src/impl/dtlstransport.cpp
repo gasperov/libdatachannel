@@ -162,8 +162,11 @@ void DtlsTransport::incoming(message_ptr message) {
 	}
 
 	PLOG_VERBOSE << "Incoming size=" << message->size();
-	mIncomingQueue.push(std::move(message));
-	enqueueRecv();
+	if (mIncomingQueue.tryPush(std::move(message))) {
+		enqueueRecv();
+	} else {
+		PLOG_VERBOSE << "DTLS incoming queue is full, dropping";
+	}
 }
 
 bool DtlsTransport::outgoing(message_ptr message) {
@@ -494,8 +497,11 @@ void DtlsTransport::incoming(message_ptr message) {
 	}
 
 	PLOG_VERBOSE << "Incoming size=" << message->size();
-	mIncomingQueue.push(std::move(message));
-	enqueueRecv();
+	if (mIncomingQueue.tryPush(std::move(message))) {
+		enqueueRecv();
+	} else {
+		PLOG_VERBOSE << "DTLS incoming queue is full, dropping";
+	}
 }
 
 bool DtlsTransport::outgoing(message_ptr message) {
@@ -828,8 +834,11 @@ void DtlsTransport::incoming(message_ptr message) {
 	}
 
 	PLOG_VERBOSE << "Incoming size=" << message->size();
-	mIncomingQueue.push(std::move(message));
-	enqueueRecv();
+	if (mIncomingQueue.tryPush(std::move(message))) {
+		enqueueRecv();
+	} else {
+		PLOG_VERBOSE << "DTLS incoming queue is full, dropping";
+	}
 }
 
 bool DtlsTransport::outgoing(message_ptr message) {
@@ -1369,7 +1378,7 @@ void DtlsTransport::incoming(message_ptr message) {
 	}
 
 	PLOG_VERBOSE << "Incoming size=" << message->size();
-	if(mIncomingQueue.tryPush(std::move(message))) {
+	if (mIncomingQueue.tryPush(std::move(message))) {
 		enqueueRecv();
 	} else {
 		PLOG_VERBOSE << "DTLS incoming queue is full, dropping";
