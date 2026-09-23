@@ -58,13 +58,18 @@ IceServer::IceServer(const string &url) {
 	} else
 		throw std::invalid_argument("Unknown ICE server protocol: " + scheme);
 
-	if (auto &query = opt[15]) {
-		if (query->find("transport=udp") != string::npos)
-			relayType = RelayType::TurnUdp;
-		if (query->find("transport=tcp") != string::npos)
-			relayType = RelayType::TurnTcp;
-		if (query->find("transport=tls") != string::npos)
-			relayType = RelayType::TurnTls;
+	if (type == Type::Turn) {
+		if (auto &query = opt[15]) {
+			bool udp = query->find("transport=udp") != string::npos;
+			bool tcp = query->find("transport=tcp") != string::npos;
+			if (relayType == RelayType::TurnTls) {
+				if (udp) throw std::invalid_argument("TURN over TLS requires transport=tcp: " + url);
+			} else if (tcp) {
+				relayType = RelayType::TurnTcp;
+			} else if (udp) {
+				relayType = RelayType::TurnUdp;
+			}
+		}
 	}
 
 	username = utils::url_decode(opt[6].value_or(""));

@@ -37,7 +37,11 @@ namespace rtc::impl {
 
 #if !USE_NICE // libjuice
 
-const int MAX_TURN_SERVERS_COUNT = 2;
+#ifdef JUICE_MAX_TURN_SERVERS_COUNT
+const int MAX_TURN_SERVERS_COUNT = JUICE_MAX_TURN_SERVERS_COUNT;
+#else
+const int MAX_TURN_SERVERS_COUNT = 2; // upstream libjuice limit
+#endif
 
 void IceTransport::Init() {
 	// Dummy
