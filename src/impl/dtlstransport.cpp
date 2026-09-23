@@ -85,6 +85,8 @@ DtlsTransport::DtlsTransport(shared_ptr<IceTransport> lower, certificate_ptr cer
 		              "Failed to set SRTP profile");
 
 		gnutls::check(gnutls_credentials_set(mSession, GNUTLS_CRD_CERTIFICATE, creds));
+		if (!mIsClient)
+			gnutls_certificate_server_set_request(mSession, GNUTLS_CERT_REQUIRE);
 
 		gnutls_dtls_set_timeouts(mSession,
 		                         1000,   // 1s retransmission timeout recommended by RFC 6347
@@ -542,7 +544,9 @@ void DtlsTransport::doRecv() {
 				}
 
 				if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
-					ThreadPool::Instance().schedule(mTimerSetAt + milliseconds(mFinMs),
+					auto timeout = mFinMs != 0 ? mTimerSetAt + milliseconds(mFinMs)
+					                           : std::chrono::steady_clock::now() + milliseconds(MBEDTLS_SSL_DTLS_TIMEOUT_DFL_MIN);
+					ThreadPool::Instance().schedule(timeout,
 					                                [weak_this = weak_from_this()]() {
 						                                if (auto locked = weak_this.lock())
 							                                locked->doRecv();
@@ -1338,9 +1342,15 @@ void DtlsTransport::start() {
 		err = SSL_get_error(mSsl, ret);
 	}
 
-	openssl::check_error(err, "Handshake failed");
+	openssl::check_error(err, "Handshake failed", mSsl);
 
-	handleTimeout();
+	// start() can run on the libjuice poll thread via the ICE state-change
+	// callback, while juice still holds its registry mutex. Calling
+	// handleTimeout() inline then waits on mSslMutex, which a thread pool
+	// recv thread may hold while blocked in juice_send (conn_lock) on the
+	// TURN relay path, forming an ABBA deadlock. Defer the initial timeout
+	// handling to the thread pool, as the other TLS backends do.
+	enqueueRecv(); // to initiate the handshake
 }
 
 void DtlsTransport::stop() {
@@ -1440,7 +1450,7 @@ void DtlsTransport::doRecv() {
 					err = SSL_get_error(mSsl, ret);
 				}
 
-				if (openssl::check_error(err, "Handshake failed")) {
+				if (openssl::check_error(err, "Handshake failed", mSsl)) {
 					// RFC 8261: DTLS MUST support sending messages larger than the current path MTU
 					// See https://www.rfc-editor.org/rfc/rfc8261.html#section-5
 					{
