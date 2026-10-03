@@ -153,9 +153,12 @@ namespace rtc::mbedtls {
 void init() {
 #if defined(MBEDTLS_THREADING_ALT) && defined(_WIN32)
 	// Must be called before any other Mbed TLS/PSA function
-	mbedtls_threading_set_alt(win32_mutex_init, win32_mutex_destroy, win32_mutex_lock,
-	                          win32_mutex_unlock, win32_cond_init, win32_cond_destroy,
-	                          win32_cond_signal, win32_cond_broadcast, win32_cond_wait);
+	static std::once_flag threadingOnce;
+	std::call_once(threadingOnce, [] {
+		mbedtls_threading_set_alt(win32_mutex_init, win32_mutex_destroy, win32_mutex_lock,
+		                          win32_mutex_unlock, win32_cond_init, win32_cond_destroy,
+		                          win32_cond_signal, win32_cond_broadcast, win32_cond_wait);
+	});
 #endif
 	check(psa_crypto_init(), "psa_crypto_init failed.");
 }
