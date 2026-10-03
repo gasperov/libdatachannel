@@ -1158,8 +1158,14 @@ void DtlsTransport::doRecv() {
 						break;
 					}
 
-					// The datagram was truncated or replayed, drop it
-					if (ret == SEC_E_INCOMPLETE_MESSAGE)
+					if (ret == SEC_I_RENEGOTIATE) {
+						handshake(message);
+						break;
+					}
+
+					// The datagram was truncated, replayed or corrupted, drop it
+					if (ret == SEC_E_INCOMPLETE_MESSAGE || ret == SEC_E_MESSAGE_ALTERED ||
+					    ret == SEC_E_DECRYPT_FAILURE || ret == SEC_E_OUT_OF_SEQUENCE)
 						break;
 
 					schannel::check(ret, "Failed to decrypt message");
