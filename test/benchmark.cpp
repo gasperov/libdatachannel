@@ -128,7 +128,8 @@ BenchResult runBenchmark(const string &name, milliseconds duration,
 
 	BenchResult result;
 	result.name = name;
-	result.connected = dc1->isOpen() && dc2 && dc2->isOpen();
+	auto adc2 = std::atomic_load(&dc2);
+	result.connected = dc1->isOpen() && adc2 && adc2->isOpen();
 
 	if (server) {
 		if (auto relayType = pc1.selectedRelayType())
@@ -174,7 +175,7 @@ size_t benchmark(milliseconds duration) {
 
 #ifdef BENCHMARK_MAIN
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv) try {
 	rtc::InitLogger(LogLevel::Warning);
 	rtc::Preload();
 
@@ -243,6 +244,9 @@ int main(int argc, char **argv) {
 	}
 
 	return anyFailed ? -1 : 0;
+} catch (const std::exception &e) {
+	cerr << "Benchmark failed: " << e.what() << endl;
+	return -1;
 }
 
 #endif // BENCHMARK_MAIN
