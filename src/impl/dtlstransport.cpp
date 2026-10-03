@@ -941,17 +941,19 @@ bool DtlsTransport::handshake(const message_ptr &message) {
 	SEC_DTLS_MTU dtlsMtu = {};
 	dtlsMtu.PathMTU = static_cast<unsigned short>(mMtu.value_or(DEFAULT_MTU) - 8 - 40); // UDP/IPv6
 
-	bool first = true;
+	const byte *data = message ? message->data() : nullptr;
+	size_t size = message ? message->size() : 0;
+	bool fragment = false;
 	while (true) {
 		// Passing no input at all makes SChannel regenerate the previous flight, which is both
 		// how a retransmission is triggered and how the next fragment is pulled out
-		const bool hasInput = first && message;
+		const bool hasInput = !fragment && size > 0;
 
 		SecBuffer inputBuffers[4] = {};
 		inputBuffers[0].BufferType = SECBUFFER_TOKEN;
 		if (hasInput) {
-			inputBuffers[0].pvBuffer = const_cast<byte *>(message->data());
-			inputBuffers[0].cbBuffer = ULONG(message->size());
+			inputBuffers[0].pvBuffer = const_cast<byte *>(data);
+			inputBuffers[0].cbBuffer = ULONG(size);
 		}
 		inputBuffers[1].BufferType = SECBUFFER_EMPTY;
 
@@ -1020,6 +1022,15 @@ bool DtlsTransport::handshake(const message_ptr &message) {
 			if (b.pvBuffer)
 				FreeContextBuffer(b.pvBuffer);
 
+		if (hasInput) {
+			size_t extra =
+			    inputBuffers[1].BufferType == SECBUFFER_EXTRA ? inputBuffers[1].cbBuffer : 0;
+			if (extra >= size)
+				extra = 0;
+			data += size - extra;
+			size = extra;
+		}
+
 		// The datagram was truncated or not a complete record, drop it
 		if (ret == SEC_E_INCOMPLETE_MESSAGE)
 			return false;
@@ -1028,13 +1039,15 @@ bool DtlsTransport::handshake(const message_ptr &message) {
 		                               : "Handshake failed (AcceptSecurityContext)");
 
 		// More output to flush before the peer can answer
-		if (ret == SEC_I_MESSAGE_FRAGMENT) {
-			first = false;
+		fragment = ret == SEC_I_MESSAGE_FRAGMENT;
+		if (fragment)
 			continue;
-		}
 
-		if (ret != SEC_E_OK)
+		if (ret != SEC_E_OK) {
+			if (size > 0)
+				continue;
 			return false; // SEC_I_CONTINUE_NEEDED
+		}
 
 		verifyPeer();
 		schannel::check(QueryContextAttributes(&mContext, SECPKG_ATTR_STREAM_SIZES, &mSizes),
