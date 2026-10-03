@@ -102,11 +102,13 @@ TestResult runTurnRelayConnectivityTest(const IceServer &server,
 	if (local.type() != Candidate::Type::Relayed)
 		return TestResult(false, "Connection is not relayed as expected");
 
+#ifdef RTC_ENABLE_TURN_TCP
 	auto relayType = pc1.selectedRelayType();
 	if (!relayType)
 		return TestResult(false, "selectedRelayType() returned no value");
 	if (*relayType != expectedRelayType)
 		return TestResult(false, "Unexpected relay transport was negotiated");
+#endif
 
 	std::atomic<bool> received = false;
 	adc2->onMessage([&received](variant<binary, string> message) {

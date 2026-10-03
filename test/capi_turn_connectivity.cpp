@@ -156,6 +156,7 @@ int runTurnRelayConnectivityMain(const char *url, rtcRelayTransport expectedRela
 		}
 	}
 
+#ifdef RTC_ENABLE_TURN_TCP
 	{
 		int relayTransport = rtcGetSelectedRelayTransport(peer1->pc);
 		if (relayTransport < 0) {
@@ -167,6 +168,7 @@ int runTurnRelayConnectivityMain(const char *url, rtcRelayTransport expectedRela
 			goto error;
 		}
 	}
+#endif
 
 	sleep(1); // let the "Hello over relay" message be exchanged
 
