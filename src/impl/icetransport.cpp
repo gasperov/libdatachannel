@@ -168,6 +168,13 @@ void IceTransport::addIceServer(IceServer server) {
 		                "(disable ICE UDP mux)";
 		return;
 	}
+#ifndef RTC_ENABLE_TURN_TLS
+	if (server.relayType == IceServer::RelayType::TurnTls) {
+		PLOG_WARNING << "TURN transport TLS is not supported with this libjuice build "
+		                "(rebuild with USE_SCHANNEL on Windows)";
+		return;
+	}
+#endif
 #else
 	if (server.relayType != IceServer::RelayType::TurnUdp) {
 		PLOG_WARNING << "TURN transports TCP and TLS are not supported with this libjuice build "
