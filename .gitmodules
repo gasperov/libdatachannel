@@ -9,7 +9,7 @@
 [submodule "deps/libjuice"]
 	path = deps/libjuice
 	url = https://github.com/gasperov/libjuice.git
-	branch = up1.7.4
+	branch = up1.7.5
 [submodule "deps/json"]
 	path = deps/json
 	url = https://github.com/nlohmann/json.git
